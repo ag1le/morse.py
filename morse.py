@@ -20,12 +20,14 @@
 import os
 import sys
 import time
+import string
 import numpy as np
+from numpy.lib import stride_tricks
 import pyaudio
 import math
 import cmath
 from scipy.io import wavfile
-from scipy.signal import butter, filtfilt
+from scipy.signal import butter, filtfilt, periodogram
 import matplotlib.pyplot as plt
 from optparse import OptionParser
 from array import *
@@ -37,6 +39,7 @@ from collections import deque
 verbosity = None
 plotter = None
 agc = None
+fft_scan = None
 
 MORSE_FREQUENCY = 600.0
 DIT_MAGIC = 1200  	# Dit length is 1200/WPM msec 
@@ -62,6 +65,23 @@ Codebook = {
   '--..--' : ',', '-....-' : '-', '.-.-.-' : '.', '-..-.' : '/', '---...' : ':', 
   '-.-.-.' : ';', '..--..' : '?', '..--.-' : '_', '.--.-.' : '@', '-.-.--' : '!'
 }
+
+""" short time fourier transform of audio signal """
+def stft(sig, frameSize, overlapFac=0.5, window=np.hanning):
+    win = window(frameSize)
+    hopSize = int(frameSize - np.floor(overlapFac * frameSize))
+    
+    # zeros at beginning (thus center of 1st window should be for sample nr. 0)
+    samples = np.append(np.zeros(np.floor(frameSize/2.0)), sig)    
+    # cols for windowing
+    cols = np.ceil( (len(samples) - frameSize) / float(hopSize)) + 1
+    # zeros at end (thus samples can be fully covered by frames)
+    samples = np.append(samples, np.zeros(frameSize))
+    
+    frames = stride_tricks.as_strided(samples, shape=(cols, frameSize), strides=(samples.strides[0]*hopSize, samples.strides[0])).copy()
+    frames *= win
+    
+    return np.fft.rfft(frames)    
 
 
 # returns a simple rolling average of n most recent values
@@ -300,14 +320,7 @@ def decode_stream(signal,samplerate):
 			ax3.set_title("AGC")
 		plt.show()
 
-# process audio file by demodulator and envelope detector 
-def process(fname):
-	Fs, x = wavfile.read(fname)
-	
-	# this could be estimated using FFT and peak detect
-	# now just assume constant CW frequency
-	freq = MORSE_FREQUENCY
-	
+def demodulate(x,Fs,freq):
 	# demodulate audio signal with known CW frequency 
 	t = np.arange(len(x))/ float(Fs)
 	y =  x*((1 + np.sin(2*np.pi*freq*t))/2 )	
@@ -322,12 +335,44 @@ def process(fname):
 	
 	#pass envelope magnitude to decoder 
 	decode_stream(z,Fs)
+
+
+# process audio file by demodulator and envelope detector 
+def process(fname):
+	Fs, x = wavfile.read(fname)
+	a = string.split(fname,".wav")
+	b = string.split(a[0],"cw")
+	sys.stdout.write(b[1])
+	sys.stdout.write(",")
+	# find frequency peaks of high volume CW signals 
+	if fft_scan:
+		f,s = periodogram(x,Fs,'blackman',4096,'linear',False,scaling='spectrum')
+		# download peakdetect from # https://gist.github.com/endolith/250860
+		from peakdetect import peakdet
+		threshold = max(s)*0.4  # only 0.4 ... 1.0 of max value freq peaks included
+		maxtab, mintab = peakdet(abs(s[0:len(s)/2-1]), threshold,f[0:len(f)/2-1] )
+
+	if plotter:
+		plt.plot(f[0:len(f)/2-1],abs(s[0:len(s)/2-1]),'g-')
+		print maxtab
+		from matplotlib.pyplot import plot, scatter, show
+		scatter(maxtab[:,0], maxtab[:,1], color='blue')
+		plt.show()
+	
+	# process all CW stations with higher than threshold volume
+	if fft_scan:
+		for freq in maxtab[:,0]:
+			print "\nfreq:%5.2f" % freq
+			demodulate(x,Fs,freq)
+	else:
+		demodulate(x,Fs,MORSE_FREQUENCY)	
 	
 def main(*args, **kwargs):
   
 	global verbosity
 	global plotter
 	global agc
+	global fft_scan
 	
 	parser = OptionParser(usage="%prog [OPTIONS] <audio files>\nDecodes morse code from .WAV audio files")
 
@@ -346,6 +391,11 @@ def main(*args, **kwargs):
 	  dest="agc",
 	  default=False,
 	  help="Use automatic gain control")
+	parser.add_option("-f", "--fft",
+	  action="store_true",
+	  dest="fft",
+	  default=False,
+	  help="Use automatic FFT frequency scan")
 
 	(options, args) = parser.parse_args()
 	if options.verbose:
@@ -354,11 +404,14 @@ def main(*args, **kwargs):
 		plotter = True
 	if options.agc:
 		agc = True
+	if options.fft:
+		fft_scan = True
 	if len(args) < 1:
 		print 'usage: [OPTIONS] <audio files>' 
 		exit(1)
 
 	#process all audio files given as arguments
+	print "ID,Prediction"
 	for i in range(0,len(args)):
 		process(args[i])
 		print ""
