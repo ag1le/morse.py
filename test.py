@@ -4,18 +4,31 @@ from math import exp, sqrt
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.io import wavfile
-from scipy.signal import butter, filtfilt, periodogram
+from scipy.signal import butter, filtfilt
 
 class BreakIt(Exception): pass
 class BreakIt2(Exception): pass
 VARFLAG = 1
 SYMFLAG = 1
-SYMPLOT = 1
+PELMFLAG =1
+SYMPLOT = 0
+PLOT = 1
 Debug = 0 
 ELM_STATES = 6
 RATE_STATES = 5 
-PATHS = 20	# min paths is 7 ..10 -> spdhat=20  11..15 -> spdhat=40 (16..20 ->spdhat 50) 21..25->spdhat=60  26..30 -> 70   31.. -> 80
-NDELAY = 200
+PATHS = 7	# min paths is 7 ..10 -> spdhat=20  11..15 -> spdhat=40 (16..20 ->spdhat 50) 21..25->spdhat=60  26..30 -> 70   31.. -> 80
+NDELAY = 100
+
+ltrarr = ['','.^', '.~', '.w','.p', '-^', '-~', '-w', '-p', '^.', '^-', '~.', '~-', 'w.', 'w-', 'p.', 'p-']
+class bcolors:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
 
 Codebook = {
   '.-'	:'A', '-...':'B', '-.-.':'C', '-..'	:'D', '.'	:'E',
@@ -33,6 +46,47 @@ Codebook = {
   '-.-.-.' : ';', '..--..' : '?', '..--.-' : '_', '.--.-.' : '@', '-.-.--' : '!'
 }
 
+from collections import namedtuple
+MyStruct = namedtuple("MyStruct", "P S I")
+
+
+
+def partition(m, start, end):
+    pivot = m.P[start]
+    left = start+1
+    # Start outside the area to be partitioned
+    right = end
+    done = False
+    while not done:
+        while left <= right and m.P[left] <= pivot:
+            left = left + 1
+        while m.P[right] >= pivot and right >=left:
+            right = right -1
+        if right < left:
+            done= True
+        else:
+            # swap places
+            m.P[left],m.P[right] = m.P[right],m.P[left]
+            m.S[left],m.S[right] = m.S[right],m.S[left]
+            m.I[left],m.I[right] = m.I[right],m.I[left]
+
+    # swap start with m[right]
+    m.P[start],m.P[right] = m.P[right],m.P[start]
+    m.S[start],m.S[right] = m.S[right],m.S[start]
+    m.I[start],m.I[right] = m.I[right],m.I[start]
+    return right
+
+
+def quicksort(m, start, end):
+    if start < end:
+        # partition the list
+        split = partition(m, start, end)
+        # sort both halves
+        quicksort(m, start, split-1)
+        quicksort(m, split+1, end)
+    return m
+    
+    
 class BayesMorse:
 	
 	# ltrstate to element state mapping 
@@ -56,23 +110,27 @@ class BayesMorse:
 		self.sample_duration = sample_dur
 		self.char = ''
 		self.PATHS = PATHS
-		self.ltrstate = [5]*PATHS # initialize to 5  
 		self.ltrlast = 0
+		self.lastrs = -1
+		
+		self.ltrstate = [5]*PATHS # initialize to 5 (-^) state
 		self.dur = [1000.]*PATHS 
-		self.wpm = [(i/5+2)*10 for i in range(PATHS)] #[40 for i in range(PATHS)] #
+		self.wpm = [(i/5+2)*10 for i in range(PATHS)] #[40 for i in range(PATHS)]
 		self.pathsv = [5]*PATHS
 		self.ykkip  = [.5]*PATHS
 		self.pkkip  = [.1]*PATHS
 		self.sort   = [0]*PATHS
+		
 		self.ltrsav = [5]*ELM_STATES*RATE_STATES*PATHS    # was 5
 		self.dursav = [0.]*ELM_STATES*RATE_STATES*PATHS
 		self.wpmsav = [20]*ELM_STATES*RATE_STATES*PATHS   # was 20 
 		self.ykksv  = [0.]*ELM_STATES*RATE_STATES*PATHS
 		self.pkksv  = [0.]*ELM_STATES*RATE_STATES*PATHS
 		self.Pold	= [1.]*ELM_STATES*RATE_STATES*PATHS 
+		
 		self.Pnew   = [[0. for col in range(PATHS)] for row in range(ELM_STATES*RATE_STATES)]
 		self.lkhd   = [[0. for col in range(PATHS)] for row in range(ELM_STATES*RATE_STATES)]
-		self.lastrs = -1
+
 		# the following are used in trelis()
 		self.ltrsv = [0]*NDELAY
 		self.ipnod = [1]*PATHS
@@ -80,6 +138,7 @@ class BayesMorse:
 		self.pthtrl = [[0. for col in range(NDELAY)] for row in range(PATHS)] 
 		self.nbuf = -1
 		self.ndelst = 0
+		self.ixlast = 0
 	
 	def normalize(self,lst):
 		s = sum(lst)
@@ -108,7 +167,7 @@ class BayesMorse:
 		# K=0 DIT, K=1 DAH, K=2 E-SPC, K=3 CHR-SPC, K=4 WRD-SPC, K=5 PAUSE
 		elem_length = [1, 3, 1, 3, 7, 14]
 		# was  3. 1.5  1.
-		aparm = [3.,3.,3.,3., 1.5, .1]
+		aparm = [3., 3., 3., 3., 1.5, .1]
 		
 		mscale = elem_length[elemtype]
 		rscale = 1200. / wpm
@@ -122,8 +181,9 @@ class BayesMorse:
 			return p1 / p0
 
 		if ((b0 < 1.) and (b1 > 1.)):
-			p1 = .5 * exp(-alpha * (b1 - 1.))      #check if -.5  or + .5 
+			p1 = -.5 * exp(-alpha * (b1 - 1.))      #check if -.5  or + .5 
 			p0 = 1. - .5 * exp(alpha * (b0 - 1.)) 
+			#print "xtrans ln170 p1=%f /p0=%f =%f"%(p1,p0,p1/p0)
 			return p1 / p0
 		return exp(-alpha * (b1 - b0))
 
@@ -160,17 +220,17 @@ class BayesMorse:
 		rtrans =[[.1,  .2, .4, .2, .1],\
 				[ .15, .2, .3, .2, .15]]
 		#SAVED ELEMENT AND NEW ELEMENT ARE THE SAME 
-		if (cur_elm == nxt_elm):
+		#if (cur_elm == nxt_elm):
 			# DON'T MAKE SPEED CHANGES DURING ELEMENT DURATION
-			if (rate_state != 2):
-				return 0.	
+			#if (rate_state != 2):
+		#	return 0.	
 
 		#OTHERWISE, OBTAIN SPEED TRANSITION PROB 
 		wpm_delta = self.memdel[nxt_elm][cur_elm]
 		index     = mempr[nxt_elm][cur_elm]
 		
 		if (index == 0): 
-			return 0.
+			return 1.
 			
 		wpm_change = (rate_state - 2) * wpm_delta
 		new_wpm = wpm + wpm_change
@@ -203,6 +263,9 @@ class BayesMorse:
 		# 	ELEMTR-     ELEMENT TRANSITION PROBABILITY MATRIX 
 		#TABLE XII Second Order Markov Symbol Transition Matrix - Page 105 Table XII
 		#elemtr[6][16] 		
+		#	[.55, .5, .5, .5, .55, .5, .5, .5,   0.,   0.,   0.,   0.,   0.,   0.,  0.,  0.],\
+		#	[.45, .5, .5, .5, .45, .5, .5, .5,   0.,   0.,   0.,   0.,   0.,   0.,  0.,  0.],\
+
 		### .^  .~  .w  .p   -^  -~  -w  -p    ^.    ^-    ~.    ~-    w.    w-   p.   p-
 		# . 
 		# -
@@ -227,6 +290,9 @@ class BayesMorse:
 		# 	SAME, THEN THE STATE TRANS PROB IS SIMPLY KEYSTATE TRANS PROB: 
 		if (elem_state == self.ltr_to_elm_state[ltrstate]):
 			pint[n] = ptrx
+			# testing - remove below 
+			psum += pint[n]
+			return psum,pint
 			
 			# 	IF CURRENT DATA RATE STATE  != 2, THEN RETURN KEYSTATE TRANS PROB
 			# See page 104 in thesis 
@@ -307,8 +373,15 @@ class BayesMorse:
 		# ROWS: K=0 DIT, K=1 DAH, K=2 E-SPC, K=3 CHR-SPC, K=4 WRD-SPC, K=5 PAUSE 
 		#
 		#         .^ .~  .w  .p   -^ -~  -w  -p  ^.  ^- ~.   ~- w.   w- p.   p-
+		#memfcn=[[ 9, 11, 13, 15,  9, 11, 13, 15, 9,  0, 11,  0, 13,  0, 15,  0],\
+		#        [10, 12, 14, 16, 10, 12, 14, 16, 0, 10,  0, 12,  0, 14,  0, 16],\
+		#        [ 1,  0,  0,  0,  5,  0,  0,  0, 1,  5,  1,  5,  1,  5,  1,  5],\
+		#        [ 0,  2,  0,  0,  0,  6,  0,  0, 2,  6,  2,  6,  2,  6,  2,  6],\
+		#        [ 0,  0,  3,  0,  0,  0,  7,  0, 3,  7,  3,  7,  3,  7,  3,  7],\
+		#        [ 0,  0,  0,  4,  0,  0,  0,  8, 4,  8,  4,  8,  4,  8,  4,  8]] 
+		#         .^ .~  .w  .p   -^ -~  -w  -p  ^. ^-  ~.  ~-  w.  w- p.   p-
 		memfcn=[[ 9, 11, 13, 15,  9, 11, 13, 15, 9,  0, 11,  0, 13,  0, 15,  0],\
-			    [10, 12, 14, 16, 10, 12, 14, 16, 0, 10,  0, 12,  0, 14,  0, 16],\
+		        [10, 12, 14, 16, 10, 12, 14, 16, 0, 10,  0, 12,  0, 14,  0, 16],\
 			    [ 1,  0,  0,  0,  5,  0,  0,  0, 1,  5,  1,  5,  1,  5,  1,  5],\
 			    [ 0,  2,  0,  0,  0,  6,  0,  0, 2,  6,  2,  6,  2,  6,  2,  6],\
 			    [ 0,  0,  3,  0,  0,  0,  7,  0, 3,  7,  3,  7,  3,  7,  3,  7],\
@@ -319,35 +392,29 @@ class BayesMorse:
 		for k in range(ELM_STATES): # 6 element states 0=dit,1=dah, 2=e-spc, 3=chr-s, 4=wrd-s, 5=pause
 			for i in range(RATE_STATES): # 5 speed (rate) states -2 -1 0 1 2 
 				
-	#NEW PATH IDENTITY: 
+			#NEW PATH IDENTITY: 
 				j = ip * ELM_STATES*RATE_STATES + i * ELM_STATES + k
 				
-	#NEW LTR STATE: 
+			# IF PREVIOUS LTR STATE IS ZERO, ASSIGN NEW LTR STATE TO ZERO ON THIS NEW PATH
 				if (self.ltrstate[ip] == 0):
 					self.ltrsav[j] = 0
-					#print "ltrstate[%d]=%d"%(ip,self.ltrstate[ip])
 					continue
-				
+			#NEW LTR STATE FROM MEMFCN TABLE [ELEM STATE][PREVIOUS LTR STATE]
 				self.ltrsav[j] = (memfcn[k][self.ltrstate[ip]-1])
-				#print "path: ltrsav[%3d]=%3d = memfcn[%d][ltrstate[%d]=%d]]=%d-1" %(j,self.ltrsav[j],k,ip,self.ltrstate[ip],memfcn[k][self.ltrstate[ip]])
-				if (self.ltrsav[j] == 0):  # check if we got 0
-					#print "path327: ltrsav[%d]=%d k=%d ltrstate[ip=%d]=%d"%(j,self.ltrsav[j],k,ip,self.ltrstate[ip])
+				if (self.ltrsav[j] == 0):  # 
 					continue
-	#  NEW DURATION: OBTAIN KEYSTATE OF SAVED PATH AND NEW STATE: 
+			#NEW DURATION: OBTAIN KEYSTATE OF SAVED PATH AND NEW STATE: 
 				ks_s = self.ltr_to_elm_state[self.ltrstate[ip]-1]
 				ixl = self.dit_dah_states[ks_s]  
 				ixs = self.dit_dah_states[k]	  
-
-	# CALCULATE DURATION - ADD SAMPLE DURATION 5 ms FOR EACH VALID PATH 
+			# CALCULATE NEW DURATION - ADD SAMPLE DURATION 5 ms FOR EACH VALID PATH 
 				self.dursav[j] = self.dur[ip] * (1 - ixs - ixl + (ixs << 1) * ixl) + self.sample_duration
-				#print "dursav[%d]=%f dur[%d]=%f * sum=%d k_new=%d k_saved=%d + sample_dur=%f" %(j,self.dursav[j],ip,self.dur[ip],(1 - ixs - ixl + (ixs << 1) * ixl),k,ks_s,sample_duration)
-	# 	NEW DATA RATE - 
+			# CALCULATE NEW DATA RATE  
 				self.wpmsav[j] = self.wpm[ip] + (i - 2) * self.memdel[k][ks_s]
-				#print "wpmsav[%d]=%d = wpm[%d]=%d +(i-2)=%d * memdel[%d][%d]=%d" %(j,self.wpmsav[j],ip,self.wpm[ip],(i-2),k,ks_s,self.memdel[k][ks_s])
 		return 0
 	
 	#=====================================
-	def model(self,ip, ielm, ixs):
+	def model(self,ip, cur_elem, key_state):
 		# 	THIS FUNCTION COMPUTES THE PARAMETERS OF THE 
 		# 	OBSERVATION STATE TRANSITION MATRIX PHI AND THE 
 		# 	MEASUREMENT MATRIX
@@ -355,9 +422,9 @@ class BayesMorse:
 		# 	VARIABLES: 
 		# 		DUR-	INPUT ELEMENT DURATION 
 		# 		WPM-	INPUT SAVED RATE 
-		# 		IELM-	INPUT ELEMENT TYPE 
+		# 		cur_elem-	INPUT ELEMENT TYPE 
 		# 		ISR-	INPUT RATE OF NEW STATE 
-		# 		IXS-	INPUT KEYSTATE OF NEW STATE 
+		# 		key_state-	INPUT KEYSTATE OF NEW STATE 
 		# 		PHI-	OUTPUT STATE TRANSITION MATRIX ENTRY FOR SIGNAL AMPLITUDE STATE 
 		# 		QA-	OUTPUT COVARIANCE FOR AMPLITUDE STATE 
 
@@ -371,33 +438,29 @@ class BayesMorse:
 		bauds = dur / r1
 		if (bauds >= 14.):
 			bauds = 14.
-		# element type 'dit' or 'dah'
-		if (ielm < 2):  # was < 2
+		# current element type 'dit' or 'dah'
+		if (cur_elem < 2):  
 			qa = 1.e-4
 			phi = 1.
 			return qa,phi
-		# else element type el-spc, chr-spc, wrd=spc  or pause
-		# next state is also 'dit' or 'dah'
-		if (ixs != 0):
+		# else current element type el-spc, chr-spc, wrd=spc  or pause
+		# next key state is 'dit' or 'dah'
+		if (key_state != 0):
 			phi = 1.
 			qa = exp((bauds - 14.) * .6) * .15
 			qa += bauds * .01 * exp((1. - bauds) * .2)
 			return qa,phi
 		#next state is el-spc, chr-spc, wrd=spc  or pause
-		xsamp = r1 * 22.4
-		d1 = (-2. / xsamp)
-		phi = pow(10.0, d1)
-
+		phi = pow(10.0, (-2. / (r1 * 22.4)))
 		if (bauds >= 14.):
 			phi = 1.
-
 		qa = 0.
 		return qa,phi
 
 
 
 	#====================================================
-	def kalfil(self, z, ip, rn, ixs, kelem, jnode, pinr):
+	def kalfil(self, z, ip, rn, key_state, cur_elem, jnode, pinr):
 
 		#   THIS FUNCTION COMPUTES THE ARRAY OF KALMAN FILTER 
 		#   RECURSIONS USED TO DETERMINE THE LIKELIHOODS. 
@@ -406,8 +469,8 @@ class BayesMorse:
 		#       Z -	INPUT MEASUREMENT 
 		#       IP -	INPUT PATH IDENTITY 
 		#       RN -	INPUT NOISE POWER ESTIMATE 
-		#       IXS -	INPUT KEYSTAT OF NEW NODE 
-		#       KELEM -	INPUT ELEM STATE OF NEW NODE 
+		#       key_state -	INPUT KEYSTATE OF NEW NODE 
+		#       cur_elem -	INPUT ELEM STATE OF NEW NODE 
 		#       ISRATE 	INPUT SPEED STATE OF NEW NODE 
 		#       DUR - 	INPUT CURRENT DURATION OF ELEMENT ON IP 
 		#       WPM 	INPUT SPEED STATE ON PATH IP 
@@ -424,10 +487,10 @@ class BayesMorse:
 			return 0.
 
 	#   OBTAIN STATE-DEPENDENT MODEL PARAMETERS: 
-		qa,phi = self.model(ip, kelem, ixs)
+		qa,phi = self.model(ip, cur_elem, key_state)
 
 	# 	COMPUTE MEASUREMENT COEFFICIENT: 
-		hz = float(ixs)
+		hz = float(key_state)
 		
 	# 	GET PREVIOUS ESTIMATES FOR PATH IP 
 
@@ -462,7 +525,7 @@ class BayesMorse:
 		""" 
 		# 	THIS FUNCTION CALCULATES,FOR EACH PATH 
 		# 	EXTENSION TO STATE N, THE LIKELIHOOD OF THAT 
-		# 	TRANSITION GIVEN THE MEASUREMENTZ. IT USES 
+		# 	TRANSITION GIVEN THE MEASUREMENT Z. IT USES 
 		# 	AN ARRAY OF LINEAR (KALMAN) FILTERS TO DO SO. 
 
 		# 	VARIABLES: 
@@ -482,17 +545,17 @@ class BayesMorse:
 			return 0
 		
 		#OBTAIN SAVED KEYSTATE: 		
-		kelem = self.ltr_to_elm_state[self.ltrstate[ip]-1]
+		cur_elem = self.ltr_to_elm_state[self.ltrstate[ip]-1]
 
 		#FOR EACH ELEMENT STATE: 
 		for k in range(ELM_STATES):
 			for i in range(RATE_STATES):
 				#OBTAIN KEYSTATE, RATE STATE, STATE N, NEW NODE: 
-				ixs = self.dit_dah_states[k]
+				key_state = self.dit_dah_states[k]
 				n = i  * ELM_STATES + k
 				j = ip * ELM_STATES*RATE_STATES + n
 				#COMPUTE AND STORE LIKELIHOOD: 
-				self.lkhd[n][ip] = self.kalfil(z, ip, rn, ixs, kelem, j, self.Pnew[n][ip])  
+				self.lkhd[n][ip] = self.kalfil(z, ip, rn, key_state, cur_elem, j, self.Pnew[n][ip])  
 		return 0
 
 	#=====================================
@@ -515,14 +578,14 @@ class BayesMorse:
 				#COMPUTE IDENTITY OF NEW PATH: 
 				j = i * ELM_STATES*RATE_STATES + n
 				#PRODUCT OF PROBS, ADD TO PSUM 
-				#NOTE: Pold[i] index is isave - using savep() stored values from previous sample
+				#NOTE: Pold[i] index is using savep() stored values from previous sample
 				psav[j] = self.Pold[i] * self.Pnew[n][i] * self.lkhd[n][i]
 				psum += psav[j]
 		#NORMALIZE TO GET PROBABILITIES SAVE: 
 		if (psum == 0.0):
-			#print "\nprobp: psum = 0"
+			print "\nprobp: psum = 0"
 			return 
-
+		
 		for j in range(isave * ELM_STATES*RATE_STATES):
 			self.Pold[j] = psav[j] / psum
 		return 
@@ -560,11 +623,10 @@ class BayesMorse:
 					# capture 'dit' and 'dah' probs in px 
 					if (k < 2):
 						px += self.Pold[j]
-					#print "pselem[%d]=%f spdhat=%f wpmsav[%d]=%d Pold=%f"%(k,pselem[k],spdhat,j,self.wpmsav[j],self.Pold[j])
 		pelm = 0.
 		for k in range(ELM_STATES):
 			# IF WANT TO PRINT ELEMENT PROBABILITIES BY SAMPLE ENABLE VARFLAG
-			if (VARFLAG):
+			if (PELMFLAG):
 				sys.stdout.write("\t%4.2f" % (pselem[k]))
 			if (pselem[k] >= pelm):
 				pelm = pselem[k]
@@ -588,11 +650,12 @@ class BayesMorse:
 
 
 		# 	VARIABLES: 
-		# 		POLD	INPUT PROBABILITY ARRAY OF NEW NODES 
+		# 		Pold	INPUT PROBABILITY ARRAY OF NEW NODES 
 		# 		PATHSV-	OUTPUT ARRAY OF THE PREVIOUS NODES TO 
 		# 				WHICH THE SAVED NODES ARE CONNECTED. 
 		# 		ISAVE-	INPUT: NO. OF PREVIOUS NODES SAVED 
-		#	OUPUT: NO. OF NODES SAVED AT CURRENT STAGE 
+		#	OUPUT: 
+		#		ISAVE-  NO. OF NODES SAVED AT CURRENT STAGE 
 		# 		IMAX-	INDEX OF HIGHEST PROBABILITY NODE 
 		# 		LTRSAV-	INPUT ARRAY OF LTR STATES AT EACH NEW NODE 
 		# 		DURSAV-	INPUT ARRAY OF SAVED DURATIONS 
@@ -602,8 +665,8 @@ class BayesMorse:
 		# 		DUR-	OUTPUT ARRAY OF SORTED DURATIONS 
 		# 		WPM-	OUTPUT ARRAY OF SORTED RATES 
 		imax = -1
-		popt = .90 # was 0.9f 
-		psav = [0]*PATHS  # save max probabilities found from Pold[] into psav[]
+		popt = 1.99 # was 0.9f 
+		psav = [0.]*PATHS  # save max probabilities found from Pold[] into psav[]
 		iconv = [0]*PATHS
 		ipsav = 0
 		jsav = 0
@@ -622,14 +685,13 @@ class BayesMorse:
 						pmax = self.Pold[j]
 						jsav = j
 						ipsav = ip
-			if (pmax > 0.00000):
+			if (pmax > 0.000001):
 				psum += pmax
 				psav[nsav] = pmax
 				self.pathsv[nsav] = ipsav
 				self.sort[nsav] = jsav
 				nsav +=1
-
-
+		
 		# 	SELECT ENOUGH ADDITIONAL NODES TO MAKE TOTAL 
 		# 	PROBABILITY SAVED EQUAL TO POPT, OR A MAX OF 'PATHS': 
 		while True:
@@ -641,7 +703,7 @@ class BayesMorse:
 						for i in range(nsav): 
 							if (j == self.sort[i]):
 								raise BreakIt
-							if (self.Pold[j] > pmax):
+							if (self.Pold[j] >= pmax):
 								pmax = self.Pold[j]
 								jsav = j
 								ipsav = ip
@@ -653,12 +715,16 @@ class BayesMorse:
 			self.pathsv[nsav] = ipsav
 			self.sort[nsav] = jsav
 			nsav += 1
-			if (psum >= popt): 
+			if (psum >= popt) or (nsav > PATHS-1):
 				break 
-			if (nsav > PATHS-1):
-				break
-		
+
+		#print "nsav=%d psum=%f"%(nsav,psum)
+		#print psav
+
 	# 	NEW ISAVE EQUALS NO. OF NODES SAVED: 
+		if (VARFLAG):
+			sys.stdout.write("%2d "%nsav)
+			#print psav
 		isave = nsav
 
 	# 	SORT THE SAVED ARRAYS TO OBTAIN THE ARRAYS 
@@ -666,77 +732,50 @@ class BayesMorse:
 		if (psum ==0.0):
 			print "error: savep line 670: psum = 0"
 			return isave,imax
-			
+		
+		S = self.sort
+		#print
+		#print psav
+		P = psav
+		I = [i for i in range(PATHS)]
+
+		ms = MyStruct(P, S, I)
+		
+		ps = quicksort(ms,0,PATHS-1)	
+		ps.P.reverse()
+		ps.I.reverse()
+		ps.S.reverse()
+		
+		
 		for i in range(isave): 
-			self.Pold[i] = psav[i] / psum
-			self.ltrstate[i] = self.ltrsav[self.sort[i]]
-			self.dur[i] = self.dursav[self.sort[i]]
-			self.wpm[i] = self.wpmsav[self.sort[i]]
-			self.ykkip[i] = self.ykksv[self.sort[i]]
-			self.pkkip[i] = self.pkksv[self.sort[i]]
+			self.Pold[i] = ps.P[i] #/ psum
+			self.ltrstate[i] = self.ltrsav[ps.S[i]]
+			self.dur[i] = self.dursav[ps.S[i]]
+			self.wpm[i] = self.wpmsav[ps.S[i]]
+			self.ykkip[i] = self.ykksv[ps.S[i]]
+			self.pkkip[i] = self.pkksv[ps.S[i]]
+			self.pathsv[i] = self.pathsv[ps.I[i]]
 			
 
-		for i in range(isave):
-			iconv[i] = 1
-
-		# FIND IF CHANGE IN SPEED, DURATION OR LETTERSTATE - MARK WITH ZERO IF NO CHANGE
-		for np in range(isave-1):
-			if (iconv[np] != 0):
-				nplus1 = np +1
-				for k in range(nplus1,isave):
-					try:
-						if (iconv[k] == 0):
-							raise BreakIt2
-						if (self.wpm[k] != self.wpm[np]):
-							#sys.stdout.write("w")
-							raise BreakIt2
-						if (self.dur[k] != self.dur[np]):
-							#sys.stdout.write("d")
-							raise BreakIt2
-						if (self.ltrstate[k] != self.ltrstate[np]):
-							#sys.stdout.write("l")
-							raise BreakIt2
-						iconv[k] = 0
-					except BreakIt2:
-						pass
-						#print "savep724: ltrstate[%d]=%d ltrstate[%d]=%d iconv=%d" %(k,self.ltrstate[k],np,self.ltrstate[np],iconv[k])
-		
-		# SAVE SORTED VALUES FOR NEXT SAMPLE 
-		psum = 0.
-		np = 0
-		for i in range(1,isave):
-			if (iconv[np] != 0):  # was iconv[i] 
-				self.Pold[np] = self.Pold[i]
-				psum += self.Pold[np]
-				#print "Pold[%d]=%f Pold[%d]=%f Psum=%f" %(np,self.Pold[np],i,self.Pold[i],psum)
-				self.sort[np] = self.sort[i]
-				self.ltrstate[np] = self.ltrstate[i]
-				self.dur[np] = self.dur[i]
-				self.wpm[np] = self.wpm[i]
-				self.ykkip[np] = self.ykkip[i]
-				self.pkkip[np] = self.pkkip[i]
-				self.pathsv[np] = self.pathsv[i]			
-				np +=1
-		
-	# 	ALSO OBTAIN HIGHEST PROBABILITY NODE: 
-		if (psum ==0.0):
-			print "error: savep line 724: psum = 0"
+			
+		#self.Pold = self.normalize(self.Pold)
+		#imax = self.Pold.index(max(self.Pold))
+		#print self.Pold
+		pmax = 0.
+		psum = sum(self.Pold[0:isave])
+		if (psum == 0.0):
+			print "error: savep line 670: psum = 0"
 			return isave,imax
 
-		isave = np		
-
-		pmax = 0.
-		self.Pold = self.normalize(self.Pold)
-		imax = self.Pold.index(max(self.Pold))
-		
-		#psum = sum(self.Pold)
-		#for i in range(isave): 
-		#	self.Pold[i] /= psum
-		#	#if (VARFLAG):
-		#	#	sys.stdout.write(" p[%d]%7.5f" %(i,self.Pold[i]))
-		#	if (self.Pold[i] > pmax):
-		#		pmax = self.Pold[i]
-		#		imax = i
+		for i in range(isave): 
+			self.Pold[i] /= psum
+			if (self.Pold[i] > pmax):
+				pmax = self.Pold[i]
+				imax = i
+			if (0):
+				sys.stdout.write(" %5.3f" %(self.Pold[i]))
+		if (VARFLAG):
+				sys.stdout.write(" %2d" %(imax))
 		return isave, imax
 
 
@@ -752,12 +791,12 @@ class BayesMorse:
 			self.char += '-'
 			return
 		def tree_leaf():
-			s = self.char #Codebook[self.char]
+			s = Codebook[self.char]
 			sys.stdout.write(s)
 			self.char = ''
 			return
 		def tree_leaf_s():
-			s = self.char #Codebook[self.char]
+			s = Codebook[self.char]
 			sys.stdout.write(s)
 			self.char = ''
 			sys.stdout.write(" ")
@@ -788,11 +827,23 @@ class BayesMorse:
 		# 1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 
 		#.^ .~ .w .p -^ -~ -w -p ^. ^- ~. ~- w. w- p. p-
 		arr = ['','.^', '.~', '.w','.p', '-^', '-~', '-w', '-p', '^.', '^-', '~.', '~-', 'w.', 'w-', 'p.', 'p-']
+
+		# 	DETERMINE IF A CSP,WSP, OR PAUSE TO MARK TRANSITION */
+		# 	HAS OCCURED; IF SO LTR IS READY FOR OUTPUT: */
+		#   IF NO CHANGE FROM LAST - RETURN */
+		"""
+		ixl = self.dit_dah_states[self.ltr_to_elm_state[ltr-1]]
+		if (ixl == self.ixlast):
+			self.ixlast = ixl
+			self.ltrlast = ltr
+			return ltr
+		"""	
+
 		
-		if (ltr != self.ltrlast):
+		if (ltr !=self.ltrlast):
 			
-			if (SYMFLAG):
-				sys.stdout.write("\t%2d %s " % (ltr,arr[int(ltr)]))
+			if (1):
+				sys.stdout.write("%2s"%(arr[ltr])) #\t%2d %s " % (ltr,arr[int(ltr)]))
 				sys.stdout.flush()
 			try:
 				options[ltr]()
@@ -800,7 +851,7 @@ class BayesMorse:
 				sys.stdout.write('*')
 		
 		if (0):
-			sys.stdout.write("\n%d %s" % (ltr,arr[int(ltr)]))
+			sys.stdout.write("\t%d %s" % (ltr,arr[int(ltr)]))
 			sys.stdout.flush()
 			#sys.stdout.write("%2d %s " % (ltr,arr[int(ltr)]))
 			
@@ -810,19 +861,12 @@ class BayesMorse:
 		
 	#=====================================
 	def trelis(self, isave, imax):
-		# Local variables 
-		#int i, k, ip, ieq, ltr, ndel, retstat
-		#static int isavg, init=0
-		#static float xsavg, xmmax, xnmax
-		#int ndlavg
-		#static float xdlavg
-
 		#    THIS FUNCTION STORES THE SAVED NODES AT EACH 
 		#    STAGE AND FORMS THE TREE OF SAVED PATHS LINKING 
 		#    THE NODES. DECODING IS ACCOMPLISHED BY FINDING 
 		#    THE CONVERGENT PATH IF IT OCCURS WITHIN A MAXIMUM 
 		#    DELAY SET BY THE PARAMETER NDELAY. IF CONVERGENCE 
-		#    TO A SINGLE PATH DOES NOT OCCURS, THEN DECODING IS 
+		#    TO A SINGLE PATH DOES NOT OCCUR, THEN DECODING IS 
 		#    DONE BY READING THE LETTER ON THE PATH WITH HIGHEST 
 		#    PROBABILITY 
 
@@ -833,11 +877,22 @@ class BayesMorse:
 		self.nbuf += 1
 		if (self.nbuf == NDELAY):
 			self.nbuf = 0
-
+		if (VARFLAG):
+			sys.stdout.write(" | ")
+		#sys.stdout.write(bcolors.OKBLUE)
 		for i in range(isave): 
 			self.pthtrl[i][self.nbuf] = self.pathsv[i]		
+			if (VARFLAG):
+				sys.stdout.write("%2d " % (self.pathsv[i]))
+		if (VARFLAG):
+			sys.stdout.write(" | " )
+		for i in range(isave): 			
 			self.lmdsav[i][self.nbuf] = self.ltrstate[i]
-			#print "833: ltrstate[%d]=%d"%(i,self.ltrstate[i])
+			if (VARFLAG):
+				sys.stdout.write("%2d%2s "%(self.ltrstate[i],ltrarr[self.ltrstate[i]]))
+		
+		#retstat = self.translate_ltr(self.ltrstate[0])
+		#return retstat,imax
 
 	# 	PERFORM DYNAMIC PROGRAM ROUTINE TO FIND CONVERGENT PATH: 
 		k = 0
@@ -853,11 +908,12 @@ class BayesMorse:
 
 			# 	IF IP EQUALS INDEX OF HIGHEST PROBABILITY NODE, STORE NODE TO IMAX 
 				for ip in range(isave): #(ip = 1 ip <= *isave ++ip) {
+					#print "ip:%d"%ip
 					i = self.nbuf - k + 1
 					if (i < 0):
 						i = NDELAY + i
-					#print "trelis: init ipnod[%d]%d [%d]=%d"%(ip,self.ipnod[ip],i,self.pthtrl[self.ipnod[ip]][i])
 					self.ipnod[ip] = self.pthtrl[self.ipnod[ip]][i]
+					#print "\ntrelis: imax=%d ipnod[ip:%d]%d = pthrl[%d][%d]=%d"%(imax,ip,self.ipnod[ip],self.ipnod[ip],i,self.pthtrl[self.ipnod[ip]][i])
 					if (ip == imax):
 						imax = self.ipnod[ip]
 
@@ -868,55 +924,57 @@ class BayesMorse:
 						continue
 					else: 
 						condition = False
+			
+				#sys.stdout.write("| conv: %2d ip:%d"% (imax,ip))
+			# 	PATHS CONVERGE SET NDEL: 
+				ndel = k + 1
 
-		# 	PATHS CONVERGE SET NDEL: 
-			ndel = k + 1
+			# 	IF POINT OF CONVERGENCE IS SAME AS IT WAS ON 
+			# 	LAST CALL, THEN NO NEED TO RE-DECODE SAME NODE: 
+				if (ndel == self.ndelst + 1):
+					self.ndelst = ndel
+					return retstat
 
-		# 	IF POINT OF CONVERGENCE IS SAME AS IT WAS ON 
-		# 	LAST CALL, THEN NO NEED TO RE-DECODE SAME NODE: 
-			if (ndel == self.ndelst + 1):
+			# 	IF POINT OF CONVERGENCE OCCURS AT SAME DELAY AS LAST CALL, THEN TRANSLATE: 
+				if (ndel == self.ndelst):
+					i = self.nbuf - ndel + 1
+					if (i < 0):
+						i = NDELAY + i
+					ltr = self.lmdsav[self.ipnod[0]][i]  # was 0 
+					#print "trelis: ipnod[0]:%d i:%d ltr=%d" %(self.ipnod[0],i,ltr)
+					self.ndelst = ndel
+					retstat = self.translate_ltr(ltr)
+					return retstat,imax
+
+			
+			# 	OTHERWISE,POINT OF CONVERGENCE HAS OCCURED 
+			# 	EARLIER ON THIS CALL, SO NEED TO TRANSLATE 
+			# 	EVERYTHING ON THE CONVERGENT PATH FROM 
+			# 	PREVIOUS POINT OF CONVERGENCE TO THIS POINT: 
+			#L350:
+				kd = 0
+				ip = self.ipnod[0]
+				for k in range(ndel,self.ndelst): #(k = ndel k <= ndelst ++k) {
+					kd +=1
+					i = self.nbuf - k + 1
+					if (i < 0):
+						i = NDELAY + i
+					self.ltrsv[kd - 1] = self.lmdsav[ip][i]
+					ip = self.pthtrl[ip][i]
+
+
+			# 	REVERSE ORDER OF DECODED LETTERS, SINCE THEY 
+			# 	WERE OBTAINED FROM THE TRELLIS IN REVERSE 
+			# 	TRANSLATE EACH: 
+
+				for i in range(kd): #(i = 1 i <= kd ++i) {
+					ltr = self.ltrsv[kd-i]
+					retstat = self.translate_ltr(ltr)
+					print "reverse order"
 				self.ndelst = ndel
-				return retstat
-
-		# 	IF POINT OF CONVERGENCE OCCURS AT SAME DELAY AS LAST CALL, THEN TRANSLATE: 
-			if (ndel == self.ndelst):
-				i = self.nbuf - ndel + 1
-				if (i < 0):
-					i = NDELAY + i
-				ltr = self.lmdsav[self.ipnod[0]][i]
-				#print "trelis: ipnod[0]:%d i:%d ltr=%d" %(self.ipnod[0],i,ltr)
-				self.ndelst = ndel
-				retstat = self.translate_ltr(ltr)
 				return retstat,imax
-
-
-		# 	OTHERWISE,POINT OF CONVERGENCE HAS OCCURED 
-		# 	EARLIER ON THIS CALL, SO NEED TO TRANSLATE 
-		# 	EVERYTHING ON THE CONVERGENT PATH FROM 
-		# 	PREVIOUS POINT OF CONVERGENCE TO THIS POINT: 
-		#L350:
-			kd = 0
-			ip = self.ipnod[0]
-			for k in range(ndel,self.ndelst): #(k = ndel k <= ndelst ++k) {
-				kd +=1
-				i = self.nbuf - k + 1
-				if (i < 0):
-					i = NDELAY + i
-				self.ltrsv[kd - 1] = self.lmdsav[ip][i]
-				ip = self.pthtrl[ip][i]
-
-
-		# 	REVERSE ORDER OF DECODED LETTERS, SINCE THEY 
-		# 	WERE OBTAINED FROM THE TRELLIS IN REVERSE 
-		# 	TRANSLATE EACH: 
-
-			for i in range(kd): #(i = 1 i <= kd ++i) {
-				ltr = self.ltrsv[kd-i]
-				retstat = self.translate_ltr(ltr)
-				print "reverse order"
-			self.ndelst = ndel
-			return retstat,imax
-
+			
+		
 	#L700:
 	# 	PATHS HAVE NOT CONVERGED AT MAXIMUM ALLOWABLE 
 	# 	DELAY, SO TRANSLATE WHAT IS ON HIGHEST 
@@ -924,7 +982,7 @@ class BayesMorse:
 		print "L700"
 		ndel = NDELAY
 		i = self.nbuf - NDELAY + 1
-		if (i <= 0):
+		if (i < 0):
 			i = NDELAY + i
 		ltr = self.lmdsav[imax][i]
 		retstat = self.translate_ltr(ltr)
@@ -938,15 +996,15 @@ class BayesMorse:
 		self.ndelst = ndel
 		return retstat,imax
 
-
-	# returns AGC decay values 
+	#=====================================
 	def decayavg(self,average,input, weight):
-
+		# returns AGC decay values 
 		if (weight <= 1.0): 
 			return input
 		else:
 			return input * (1.0 / weight) + average * (1.0 - (1.0 / weight))
-		
+	
+	#=====================================		
 	def noise(self,z,rn,mn):
 		a = rn if (z > 2*mn ) else z
 		rn = self.decayavg(rn,a,60)
@@ -962,7 +1020,7 @@ def decode_stream(signal,samplerate):
 	y4 = []
 	y5 = []
 	y6 = []
-	rn = 0.05
+	rn = 0.0015
 	_isave = PATHS
 	imax = 0
 	pselem =[0.]*6
@@ -978,6 +1036,7 @@ def decode_stream(signal,samplerate):
 
 	z = signal[1::decimate]/max(signal)
 	mn = abs(min(z))
+	rn = mn + 0.001
 	print "length=%d min=%f samplerate=%d decimate=%d sample=%f"%(len(z), mn, samplerate, decimate, sample_dur)
 	
 	for j in range(len(z)):
@@ -1002,16 +1061,17 @@ def decode_stream(signal,samplerate):
 		y2.append(pselem[1])	# blue 				- dah 
 		y3.append(pselem[2])	# magenta(violet) 	- el-space
 		y4.append(pselem[3])	# cyan(light blue)	- chr-space
-		y5.append(rs/10.)	    # yellow			- wrd-space
-		y6.append(khat)			# blue * 			- element state 
+		y5.append(spdhat/10.)	    # yellow			- wrd-space
+		y6.append(khat+1)			# blue * 			- element state 
 		x.append(j)
 		
 		#print percentage done 
 		#sys.stdout.write("\r%4.2f %%" % (100.*float(j)/len(z)))
 		#sys.stdout.flush()
 		
-	plt.plot(x,y,'g',x,y1,'r',x,y2,'b',x,y3,'m',x,y4,'c',x,y5,'y',x,y6,'b*')
-	plt.show()	
+	if (PLOT):
+		plt.plot(x,y,'g',x,y1,'r',x,y2,'b',x,y3,'m',x,y4,'c',x,y5,'y',x,y6,'b*')
+		plt.show()	
 
 
 
@@ -1031,6 +1091,11 @@ def demodulate(x,Fs,freq):
     decode_stream(abs(z),Fs)
 
 ### MAIN PROGRAM ####
+def main(argv):
+	Fs, x = wavfile.read(argv[1]) #test20db.wav cw002.wav
+	demodulate(x,Fs,600)
 
-Fs, x = wavfile.read("test20db.wav") #test20db.wav cw002.wav
-demodulate(x,Fs,600)
+
+if __name__ == '__main__':
+  main(sys.argv)
+
