@@ -83,6 +83,7 @@ def stft(sig, frameSize, overlapFac=0.5, window=np.hanning):
     
     return np.fft.rfft(frames)    
 
+<<<<<<< HEAD
 class KalmanFilter1D:
     def __init__(self, x0, P, R, Q):
         self.x = x0 #initial state
@@ -99,6 +100,8 @@ class KalmanFilter1D:
     def predict(self, u=0.0):
         self.x += u
         self.P += self.Q
+=======
+>>>>>>> 27e5fc2cdd78b7a185fa9dabe4b0fbd2eb94382d
 
 # returns a simple rolling average of n most recent values
 # Adapted from: http://www.raspberrypi.org/forums/viewtopic.php?f=32&t=69797
@@ -274,6 +277,7 @@ class Morse:
 
 # decode signal envelope into Morse symbols and then characters
 def decode_stream(signal,samplerate):
+<<<<<<< HEAD
 
 	# create morse object
 	m = Morse(signal,samplerate)
@@ -297,11 +301,19 @@ def decode_stream(signal,samplerate):
 		plt.plot(ps)
 		ax2.set_title("Variance")
 		plt.show()
+=======
+	# create morse object
+	m = Morse(signal,samplerate)
+
+>>>>>>> 27e5fc2cdd78b7a185fa9dabe4b0fbd2eb94382d
 	# assume 10ms signal rise time 
 	bfv = (samplerate * .010)   
 	# moving average filter to smooth signal envelope - reduce noise spikes
 	env = np.resize(np.convolve(signal, np.ones(bfv)/bfv),len(signal))
+<<<<<<< HEAD
 	#env = estimate
+=======
+>>>>>>> 27e5fc2cdd78b7a185fa9dabe4b0fbd2eb94382d
 	mx = np.nanmax(env)
 	mn = np.nanmin(env)
 	mean = np.mean(env)
@@ -358,7 +370,11 @@ def decode_stream(signal,samplerate):
 		plt.show()
 
 def demodulate(x,Fs,freq):
+<<<<<<< HEAD
     # demodulate audio signal with known CW frequency 
+=======
+	# demodulate audio signal with known CW frequency 
+>>>>>>> 27e5fc2cdd78b7a185fa9dabe4b0fbd2eb94382d
 	t = np.arange(len(x))/ float(Fs)
 	y =  x*((1 + np.sin(2*np.pi*freq*t))/2 )	
 	
@@ -367,9 +383,15 @@ def demodulate(x,Fs,freq):
 	#for high SNR signals 50 Hz is better, for low SNR 20Hz is better
 	# 25Hz is a compromise - could this be made an adaptive value? 
 	Wn = 40./ (Fs/2.)  	# 25 Hz cut-off for lowpass  
+<<<<<<< HEAD
 	b, a = butter(7, Wn)  	# 2nd order butter filter
 	#z = filtfilt(b, a, abs(y))
 	z = filtfilt(b, a, abs(y))
+=======
+	b, a = butter(2, Wn)  	# 2nd order butter filter
+	z = filtfilt(b, a, abs(y))
+	
+>>>>>>> 27e5fc2cdd78b7a185fa9dabe4b0fbd2eb94382d
 	#pass envelope magnitude to decoder 
 	decode_stream(z,Fs)
 
@@ -392,8 +414,13 @@ def process(fname):
 	if plotter:
 		plt.plot(f[0:len(f)/2-1],abs(s[0:len(s)/2-1]),'g-')
 		print maxtab
+<<<<<<< HEAD
 		#from matplotlib.pyplot import plot, scatter, show
 		plt.scatter(maxtab[:,0], maxtab[:,1], c='r') #color='blue')
+=======
+		from matplotlib.pyplot import plot, scatter, show
+		scatter(maxtab[:,0], maxtab[:,1], color='blue')
+>>>>>>> 27e5fc2cdd78b7a185fa9dabe4b0fbd2eb94382d
 		plt.show()
 	
 	# process all CW stations with higher than threshold volume
